@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Procedural Material Matcher</title>
+<style>
+  :root {
+    --bg: #14161c; --panel: #1d2029; --panel2: #252935;
+    --line: #343947; --text: #e6e8ee; --muted: #9aa3b5;
+    --accent: #6ea8fe; --good: #4cc38a; --warn: #e0b341; --err: #ef6f6c;
+    --info: #67c7e8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.45 -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 17px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  .layout {
+    display: grid; grid-template-columns: 320px 1fr 360px;
+    gap: 14px; padding: 14px 20px; align-items: start;
+  }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px; margin-bottom: 14px;
+  }
+  .panel h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); margin: 0 0 10px;
+  }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  select, input[type=number] {
+    width: 100%; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px;
+  }
+  input[type=range] { width: 100%; }
+  button {
+    background: var(--accent); color: #0b1220; border: 0; border-radius: 7px;
+    padding: 8px 12px; font-weight: 600; cursor: pointer; margin-top: 10px;
+    width: 100%;
+  }
+  button.secondary { background: var(--panel2); color: var(--text);
+    border: 1px solid var(--line); }
+  button:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .img-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .img-grid.three { grid-template-columns: repeat(3, 1fr); }
+  figure { margin: 0; background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px; }
+  figure img { width: 100%; image-rendering: pixelated; display: block;
+    border-radius: 5px; background: #000; }
+  figcaption { font-size: 11px; color: var(--muted); margin-top: 6px;
+    display: flex; justify-content: space-between; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 700;
+  }
+  .badge.running { background: #2b3a5c; color: var(--accent); }
+  .badge.done { background: #1f3d2e; color: var(--good); }
+  .badge.error { background: #4a2626; color: var(--err); }
+  .badge.idle { background: var(--panel2); color: var(--muted); }
+  .badge.fitted { background: #1f3d2e; color: var(--good); }
+  .badge.partial { background: #42381c; color: var(--warn); }
+  .badge.failed { background: #4a2626; color: var(--err); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  td, th { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .node-card { background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 9px 10px; margin-bottom: 8px; }
+  .node-card .node-head { font-weight: 700; display: flex;
+    justify-content: space-between; align-items: center; }
+  .node-card .node-type { color: var(--accent); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .05em; }
+  .truth { color: var(--good); }
+  .anomaly { border-left: 3px solid var(--muted); padding: 7px 10px;
+    margin-bottom: 7px; border-radius: 0 6px 6px 0; background: var(--panel2); }
+  .anomaly.error { border-color: var(--err); }
+  .anomaly.warning { border-color: var(--warn); }
+  .anomaly.info { border-color: var(--info); }
+  .anomaly .code { font-weight: 700; font-size: 11px;
+    text-transform: uppercase; letter-spacing: .04em; }
+  .anomaly.error .code { color: var(--err); }
+  .anomaly.warning .code { color: var(--warn); }
+  .anomaly.info .code { color: var(--info); }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px;
+    font-size: 12px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { text-align: right; font-variant-numeric: tabular-nums; }
+  .cluster { border: 1px solid var(--line); border-radius: 7px;
+    padding: 8px; margin-bottom: 7px; background: var(--panel2); }
+  .cluster.best { border-color: var(--good); }
+  .pill { font-size: 10px; padding: 1px 6px; border-radius: 999px;
+    background: var(--panel); color: var(--muted); border: 1px solid var(--line); }
+  .pill.accept { color: var(--good); border-color: var(--good); }
+  .pill.reject { color: var(--err); border-color: var(--err); }
+  canvas { width: 100%; height: 150px; background: var(--panel2);
+    border-radius: 7px; border: 1px solid var(--line); }
+  .muted { color: var(--muted); }
+  .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+  .scroll { max-height: 320px; overflow: auto; }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .stat-line { display:flex; justify-content:space-between; font-size:12px;
+    padding:2px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Procedural Material Matcher</h1>
+  <span class="sub">Inverse-solve an <b>editable node graph</b> for a target texture — appearance alone never certifies a unique parameter set.</span>
+  <span style="flex:1"></span>
+  <span>Run: <span id="runState" class="badge idle">idle</span></span>
+  <span>Fit: <span id="fitState" class="badge idle">—</span></span>
+</header>
+
+<div class="layout">
+  <!-- ===================== LEFT: target + controls ===================== -->
+  <div>
+    <div class="panel">
+      <h2>1 · Target appearance</h2>
+      <label>Target type</label>
+      <select id="kind">
+        <option value="procedural">Procedural (known ground truth)</option>
+        <option value="inexpressible">Inexpressible pattern</option>
+      </select>
+      <div id="inexprBox" style="display:none">
+        <label>Inexpressible pattern</label>
+        <select id="inexpr">
+          <option value="checkerboard">Checkerboard</option>
+          <option value="grid">Fine grid</option>
+          <option value="blobs">Sharp blobs</option>
+        </select>
+      </div>
+      <div class="row">
+        <div><label>Render size</label><input type="number" id="size" value="64" min="24" max="128" step="8"></div>
+        <div><label>Seed</label><input type="number" id="seed" value="3" min="0" max="9999"></div>
+      </div>
+      <div class="row">
+        <div><label>Template</label>
+          <select id="template"><option value="chain">Noise chain</option>
+          <option value="blend">Blend graph</option></select></div>
+        <div><label>Coord space</label>
+          <select id="space"><option value="object">object</option>
+          <option value="world">world</option></select></div>
+      </div>
+      <button id="loadBtn" class="secondary">Load / regenerate target</button>
+      <figure style="margin-top:10px"><img id="targetImg" alt="target">
+        <figcaption><span>Target swatch</span><span id="targetKind" class="pill"></span></figcaption>
+      </figure>
+    </div>
+
+    <div class="panel">
+      <h2>2 · Edit appearance (photometric)</h2>
+      <label>Brightness <span id="brightVal" class="mono">0.00</span></label>
+      <input type="range" id="brightness" min="-0.4" max="0.4" step="0.01" value="0">
+      <label>Contrast <span id="contrastVal" class="mono">0.00</span></label>
+      <input type="range" id="contrast" min="-0.8" max="1.5" step="0.01" value="0">
+      <label>Hue shift (°) <span id="hueVal" class="mono">0</span></label>
+      <input type="range" id="hue" min="-180" max="180" step="1" value="0">
+      <div class="row">
+        <button id="applyEdit" class="secondary">Apply edits</button>
+        <button id="resetEdit" class="secondary">Reset sliders</button>
+      </div>
+      <div class="hint">Edits change the pixels the optimiser sees; the original
+        image file is never handed to the solver.</div>
+    </div>
+
+    <div class="panel">
+      <h2>3 · Run inverse search</h2>
+      <label>Discrete configs explored (speed vs. ambiguity coverage)</label>
+      <select id="maxConfigs">
+        <option value="2">fast (2)</option>
+        <option value="4" selected>balanced (4)</option>
+        <option value="6">thorough (6)</option>
+      </select>
+      <button id="fitBtn">Fit material graph</button>
+      <div class="hint">Continuous params use a dense full-range axis grid +
+        coordinate descent; discrete seeds/kinds/octaves are enumerated and
+        pre-screened in two tiers.</div>
+    </div>
+  </div>
+
+  <!-- ===================== CENTER: images + trajectory ===================== -->
+  <div>
+    <div class="panel">
+      <h2>Optimisation trajectory</h2>
+      <canvas id="chart" width="760" height="150"></canvas>
+      <div class="stat-line"><span class="muted">Evaluations</span><span id="evals" class="mono">0</span></div>
+      <div class="stat-line"><span class="muted">Best loss</span><span id="liveLoss" class="mono">—</span></div>
+      <div class="stat-line"><span class="muted">Current stage</span><span id="stage" class="mono">—</span></div>
+    </div>
+
+    <div class="panel">
+      <h2>Target vs. regenerated material vs. difference</h2>
+      <div class="img-grid three">
+        <figure><img id="rTarget" alt=""><figcaption><span>Target</span></figcaption></figure>
+        <figure><img id="rRender" alt=""><figcaption><span>Fitted graph render</span><span id="lossTag" class="pill"></span></figcaption></figure>
+        <figure><img id="rDiff" alt=""><figcaption><span>Diff ×3 (residual)</span></figcaption></figure>
+      </div>
+      <div class="hint" id="residualHint"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Witness decal — object vs. world sampling after mesh move</h2>
+      <div class="img-grid">
+        <figure><img id="wObj" alt=""><figcaption><span>Object-space (locked to mesh)</span><span id="objRes" class="pill"></span></figcaption></figure>
+        <figure><img id="wWld" alt=""><figcaption><span>World-space (grounded)</span><span id="wldRes" class="pill"></span></figcaption></figure>
+      </div>
+      <div id="witnessBody" class="mono muted" style="margin-top:8px">Run a fit to compute the witness decal.</div>
+    </div>
+  </div>
+
+  <!-- ===================== RIGHT: graph, equiv, anomalies ===================== -->
+  <div>
+    <div class="panel">
+      <h2>Recovered material graph (editable)</h2>
+      <div id="graphBody" class="scroll"><div class="muted">No fit yet.</div></div>
+      <button id="downloadGraph" class="secondary" disabled>Download fitted graph JSON</button>
+    </div>
+
+    <div class="panel">
+      <h2>Equivalent solutions</h2>
+      <div id="equivBody" class="scroll"><div class="muted">No fit yet.</div></div>
+      <div class="hint">Clusters within tolerance of the best loss are retained:
+        different parameters can produce near-identical appearance on one swatch.</div>
+    </div>
+
+    <div class="panel">
+      <h2>Anomalies — parameters &amp; render diff</h2>
+      <div id="anomBody"><div class="muted">No fit yet.</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let pollTimer = null, lastGraphJson = null, chartData = [];
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  return res.json();
+}
+async function post(path, body) {
+  return api(path, {method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify(body)});
+}
+
+// ---- target controls -------------------------------------------------------
+$('kind').onchange = () => {
+  $('inexprBox').style.display = $('kind').value === 'inexpressible' ? 'block' : 'none';
+};
+async function loadTarget() {
+  const body = {
+    kind: $('kind').value, size: +$('size').value, seed: +$('seed').value,
+    template: $('template').value, space: $('space').value,
+    inexpressible: $('inexpr').value,
+  };
+  const r = await post('/api/target', body);
+  $('targetImg').src = '/api/target.png?t=' + Date.now();
+  $('targetKind').textContent = body.kind;
+  resetResults();
+}
+$('loadBtn').onclick = loadTarget;
+
+// ---- photometric edits -----------------------------------------------------
+['brightness','contrast','hue'].forEach(id =>
+  $(id).oninput = () => $(id+'Val').textContent = $(id).value);
+$('applyEdit').onclick = async () => {
+  await post('/api/edit', {brightness:+$('brightness').value,
+    contrast:+$('contrast').value, hue:+$('hue').value});
+  $('targetImg').src = '/api/target.png?t=' + Date.now();
+  resetResults();
+};
+$('resetEdit').onclick = () => {
+  ['brightness','contrast','hue'].forEach(id => {$(id).value = 0; $(id+'Val').textContent='0';});
+};
+
+// ---- fit -------------------------------------------------------------------
+$('fitBtn').onclick = async () => {
+  resetResults();
+  setRunState('running');
+  $('fitBtn').disabled = true;
+  chartData = []; drawChart();
+  const r = await post('/api/fit', {max_configs: +$('maxConfigs').value});
+  if (r.error) { setRunState('error'); $('fitBtn').disabled = false;
+    $('stage').textContent = r.error; return; }
+  pollTimer = setInterval(poll, 700);
+};
+
+function setRunState(s) {
+  const el = $('runState'); el.className = 'badge ' + s;
+  el.textContent = s === 'done' ? 'complete' : s;
+}
+
+async function poll() {
+  const s = await api('/api/job');
+  if (s.error) { return; }
+  if (s.state === 'running' || s.state === 'idle') {
+    $('evals').textContent = (s.trajectory || []).reduce(
+      (m,t) => Math.max(m, t.evaluations), 0);
+    const traj = s.trajectory || [];
+    if (traj.length) {
+      const last = traj[traj.length-1];
+      $('liveLoss').textContent = last.best_loss.toFixed(4);
+      $('stage').textContent = last.stage || '—';
+      chartData = traj.map(t => ({x:t.evaluations, y:t.best_loss, stage:t.stage}));
+      drawChart();
+    }
+    return;
+  }
+  clearInterval(pollTimer); pollTimer = null;
+  $('fitBtn').disabled = false;
+  if (s.state === 'error') { setRunState('error');
+    $('stage').textContent = s.error; return; }
+  setRunState('done');
+  renderReport(s.report);
+}
+
+function resetResults() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  setRunState('idle'); $('fitState').className='badge idle'; $('fitState').textContent='—';
+  ['rTarget','rRender','rDiff','wObj','wWld'].forEach(id => $(id).removeAttribute('src'));
+  $('graphBody').innerHTML = '<div class="muted">No fit yet.</div>';
+  $('equivBody').innerHTML = '<div class="muted">No fit yet.</div>';
+  $('anomBody').innerHTML = '<div class="muted">No fit yet.</div>';
+  $('witnessBody').textContent = 'Run a fit to compute the witness decal.';
+  $('downloadGraph').disabled = true; lastGraphJson = null;
+  $('evals').textContent='0'; $('liveLoss').textContent='—'; $('stage').textContent='—';
+  $('residualHint').textContent=''; $('lossTag').textContent='';
+  $('objRes').textContent=''; $('wldRes').textContent='';
+}
+
+// ---- report rendering ------------------------------------------------------
+async function renderReport(rep) {
+  $('fitState').className = 'badge ' + rep.status;
+  $('fitState').textContent = rep.status;
+  $('evals').textContent = rep.evaluations;
+  $('liveLoss').textContent = rep.best_loss.toFixed(4);
+  $('lossTag').textContent = 'loss ' + rep.best_loss.toFixed(4);
+
+  const imgs = await api('/api/result_images');
+  if (!imgs.error) {
+    $('rTarget').src = 'data:image/png;base64,' + imgs.target;
+    $('rRender').src = 'data:image/png;base64,' + imgs.render;
+    $('rDiff').src   = 'data:image/png;base64,' + imgs.diff_amplified;
+    if (imgs.witness_object) $('wObj').src = 'data:image/png;base64,' + imgs.witness_object;
+    if (imgs.witness_world)  $('wWld').src = 'data:image/png;base64,' + imgs.witness_world;
+  }
+  renderGraph(rep);
+  renderEquiv(rep);
+  renderAnoms(rep);
+  renderWitness(rep);
+  renderResidualHint(rep);
+  lastGraphJson = rep.graph_json;
+  $('downloadGraph').disabled = false;
+}
+
+function renderResidualHint(rep) {
+  const comps = rep.best_components || {};
+  const scales = Object.keys(comps);
+  if (!scales.length) return;
+  const parts = scales.map(k => {
+    const c = comps[k];
+    return k + ': pixel ' + c.pixel.toFixed(3) + ' · spec ' + c.spectrum.toFixed(3);
+  });
+  $('residualHint').innerHTML =
+    'Multi-scale residual components — ' + parts.join(' &nbsp;|&nbsp; ');
+}
+
+function renderGraph(rep) {
+  const truth = rep.ground_truth || {};
+  $('graphBody').innerHTML = rep.graph.nodes.map(n => {
+    const rows = n.params.map(p => {
+      const key = n.id + '.' + p.name;
+      const tval = truth[key];
+      const val = typeof p.value === 'number' ? p.value.toFixed(3) : p.value;
+      const trow = (tval !== undefined)
+        ? '<span class="truth" title="known ground truth">truth ' +
+          (typeof tval === 'number' ? tval.toFixed(3) : tval) + '</span>' : '';
+      const discrete = p.choices.length
+        ? '<span class="pill">' + p.kind + '</span>' : '';
+      return '<tr><td>' + p.name + ' ' + discrete + '</td>' +
+        '<td class="num">' + val + '</td><td class="num">' + trow + '</td></tr>';
+    }).join('');
+    return '<div class="node-card"><div class="node-head"><span>' + n.id +
+      '</span><span class="node-type">' + n.label + '</span></div>' +
+      '<table><tr><th>param</th><th class="num">value</th><th class="num"></th></tr>' +
+      rows + '</table></div>';
+  }).join('');
+}
+
+function renderEquiv(rep) {
+  if (!rep.equivalents.length) {
+    $('equivBody').innerHTML = '<div class="muted">None.</div>'; return;
+  }
+  $('equivBody').innerHTML = rep.equivalents.map((e, i) => {
+    const keys = Object.keys(e.params).slice(0, 4);
+    const sample = keys.map(k => '<div class="kv"><span class="k">' + k +
+      '</span><span class="v">' + fmt(e.params[k]) + '</span></div>').join('');
+    return '<div class="cluster' + (i === 0 ? ' best' : '') + '">' +
+      '<div class="node-head"><b>Cluster ' + e.cluster_id + (i === 0 ? ' ★ best' : '') +
+      '</b><span class="pill">loss ' + e.loss.toFixed(4) + '</span></div>' +
+      sample + '<div class="hint">…' + Object.keys(e.params).length +
+      ' params total</div></div>';
+  }).join('');
+}
+function fmt(v){ return typeof v === 'number' ? v.toFixed(3) : v; }
+
+function renderAnoms(rep) {
+  if (!rep.anomalies.length) {
+    $('anomBody').innerHTML = '<div class="muted">No anomalies flagged.</div>'; return;
+  }
+  $('anomBody').innerHTML = rep.anomalies.map(a =>
+    '<div class="anomaly ' + a.severity + '"><div class="code">' + a.code +
+    ' · ' + a.severity + '</div><div>' + a.message + '</div>' +
+    (a.params ? '<div class="mono muted" style="margin-top:4px">' +
+      a.params.join(', ') + '</div>' : '') + '</div>').join('');
+}
+
+function renderWitness(rep) {
+  const w = rep.witness;
+  if (!w) { $('witnessBody').textContent = 'Witness decal disabled.'; return; }
+  $('objRes').textContent = 'motion ' + w.object_motion_residual.toFixed(4);
+  $('wldRes').textContent = 'motion ' + w.world_motion_residual.toFixed(4);
+  const acc = w.accepted_params.map(p =>
+    '<span class="pill accept">' + p.param + '</span>').join(' ');
+  const rej = w.rejected_params.map(p =>
+    '<span class="pill reject">' + p.param + ' (' + p.normalised_distance +
+    ')</span>').join(' ');
+  $('witnessBody').innerHTML =
+    '<div class="kv">' +
+    kv('Resolved coordinate space', w.resolved_space) +
+    kv('Mesh shift', '(' + w.shift.map(x=>x.toFixed(2)).join(', ') + ')') +
+    kv('Baseline boundary error', w.baseline_boundary_error.toFixed(4)) +
+    kv('Object boundary error', w.object_boundary_error.toFixed(4)) +
+    kv('World boundary error', w.world_boundary_error.toFixed(4)) +
+    kv('Object motion residual', w.object_motion_residual.toFixed(4)) +
+    kv('World motion residual', w.world_motion_residual.toFixed(4)) +
+    kv('Second-scale residual (uv ' + w.second_scale_uv.toFixed(2) + ')',
+       w.second_scale_motion_residual.toFixed(4)) +
+    kv('Period-aliasing warning', w.alias_warning ? 'yes — broken by 2nd scale' : 'no') +
+    '</div>' +
+    '<div style="margin-top:8px"><b class="muted">Accepted as same-solution:</b><br>' +
+    (acc || '<span class="muted">none</span>') + '</div>' +
+    '<div style="margin-top:6px"><b class="muted">Rejected / not certified:</b><br>' +
+    (rej || '<span class="muted">none</span>') + '</div>';
+}
+function kv(k, v){ return '<span class="k">' + k + '</span><span class="v">' + v + '</span>'; }
+
+// ---- chart -----------------------------------------------------------------
+function drawChart() {
+  const c = $('chart'), ctx = c.getContext('2d');
+  ctx.clearRect(0,0,c.width,c.height);
+  if (chartData.length < 2) {
+    ctx.fillStyle = '#9aa3b5'; ctx.font = '12px sans-serif';
+    ctx.fillText('Waiting for trajectory points…', 12, 24); return;
+  }
+  const pad = 34, W = c.width - pad - 10, H = c.height - pad - 12;
+  const xs = chartData.map(d=>d.x), ys = chartData.map(d=>d.y);
+  const xmin = Math.min(...xs), xmax = Math.max(...xs);
+  const ymin = Math.min(...ys), ymax = Math.max(...ys);
+  const X = x => pad + (x - xmin) / Math.max(xmax-xmin,1e-9) * W;
+  const Y = y => 12 + H - (y - ymin) / Math.max(ymax-ymin,1e-9) * H;
+  ctx.strokeStyle = '#343947'; ctx.beginPath();
+  ctx.moveTo(pad,12); ctx.lineTo(pad,12+H); ctx.lineTo(pad+W,12+H); ctx.stroke();
+  ctx.strokeStyle = '#6ea8fe'; ctx.lineWidth = 2; ctx.beginPath();
+  chartData.forEach((d,i) => i ? ctx.lineTo(X(d.x),Y(d.y)) : ctx.moveTo(X(d.x),Y(d.y)));
+  ctx.stroke();
+  ctx.fillStyle = '#9aa3b5'; ctx.font = '10px monospace';
+  ctx.fillText(ymax.toFixed(3), 2, 16);
+  ctx.fillText(ymin.toFixed(3), 2, 12+H);
+  ctx.fillText(xmin + ' evals', pad, c.height-4);
+  ctx.fillText(xmax + ' evals', pad+W-50, c.height-4);
+}
+
+$('downloadGraph').onclick = () => {
+  if (!lastGraphJson) return;
+  const blob = new Blob([JSON.stringify(lastGraphJson, null, 2)],
+    {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'fitted_graph.json'; a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+loadTarget();
+</script>
+</body>
+</html>
