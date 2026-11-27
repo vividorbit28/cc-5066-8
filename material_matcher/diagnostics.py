@@ -19,8 +19,14 @@ def _at_bound(graph, nid, spec):
         abs(v - spec.low) <= BOUND_EPS or abs(v - spec.high) <= BOUND_EPS)
 
 
-def diagnose(result, target, witness=None):
-    """Return a list of anomaly dicts for a SearchResult."""
+def diagnose(result, target, witness=None, coupling=None):
+    """Return a list of anomaly dicts for a SearchResult.
+
+    Every flag is backed by a measured quantity carried in its ``evidence``
+    payload; coupling flags are only raised when the corresponding probe
+    actually observed the condition, so an unrun or inconclusive probe never
+    produces a report (no false positives).
+    """
     anomalies = []
     g = result.graph
     comps = result.best_components or {}
@@ -123,7 +129,97 @@ def diagnose(result, target, witness=None):
                            "coordinate spaces.",
                 "params": [p["param"] for p in witness.rejected_params],
             })
+
+    if coupling is not None:
+        anomalies.extend(_coupling_anomalies(coupling))
     return anomalies
+
+
+def _coupling_anomalies(coupling):
+    """Turn measured coupling probes into evidence-backed anomaly records."""
+    out = []
+    pair = coupling.get("equivalent_pair")
+    if pair is not None and pair.front_equivalent:
+        evidence = {
+            "front_error_a": pair.front_error_a,
+            "front_error_b": pair.front_error_b,
+            "second_error_a": pair.second_error_a,
+            "second_error_b": pair.second_error_b,
+            "front_uv": pair.front_uv,
+            "second_uv": pair.second_uv,
+            "locked": list(pair.locked),
+            "preset_eligible": pair.preset_eligible,
+            "stage": "final",
+        }
+        if pair.attribution == "ambiguous":
+            out.append({
+                "severity": "warning",
+                "code": "coupled_parameter_family",
+                "message": "the surface-frequency and sampling-scale "
+                           "branches match at the front view and predict the "
+                           "second view equally; the parameter family is "
+                           "retained but no branch is written to a preset.",
+                "evidence": evidence,
+            })
+        else:
+            out.append({
+                "severity": "info",
+                "code": "coupling_attributed",
+                "message": f"second-view pixel error attributes the "
+                           f"appearance to the {pair.attribution} branch; "
+                           f"preset eligibility: {pair.preset_eligible}. "
+                           + pair.reason,
+                "evidence": evidence,
+            })
+
+    for surface in coupling.get("coupling_surfaces", []):
+        if surface.verdict == "coupled":
+            out.append({
+                "severity": "warning",
+                "code": "parameter_coupling",
+                "message": surface.reason,
+                "evidence": {
+                    "param_a": surface.param_a, "param_b": surface.param_b,
+                    "axis_peak_a": surface.axis_peak_a,
+                    "axis_peak_b": surface.axis_peak_b,
+                    "compensating_peak": surface.compensating_peak,
+                    "opposing_peak": surface.opposing_peak,
+                    "stage": "final",
+                },
+            })
+        elif surface.verdict == "derivative_error":
+            out.append({
+                "severity": "warning",
+                "code": "derivative_error",
+                "message": surface.reason,
+                "evidence": {
+                    "param_a": surface.param_a, "param_b": surface.param_b,
+                    "axis_peak_a": surface.axis_peak_a,
+                    "axis_peak_b": surface.axis_peak_b,
+                    "compensating_peak": surface.compensating_peak,
+                    "stage": "final",
+                },
+            })
+
+    stagnation = coupling.get("stagnation")
+    if stagnation is not None and stagnation.verdict != "converged":
+        severity = {"stagnation": "warning",
+                    "non_identifiable": "warning",
+                    "deficient_observation": "info"}.get(
+            stagnation.verdict, "info")
+        out.append({
+            "severity": severity,
+            "code": f"coupling_{stagnation.verdict}",
+            "message": stagnation.reason,
+            "evidence": {
+                "observed_fraction": stagnation.observed_fraction,
+                "observed_error": stagnation.observed_error,
+                "full_error": stagnation.full_error,
+                "initial_loss": stagnation.initial_loss,
+                "stage": stagnation.stage or "final",
+            },
+        })
+    return out
 
 
 def fit_status(result):

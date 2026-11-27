@@ -149,10 +149,33 @@ def loss_terms(render, target, profile="fine"):
     }
 
 
+def pixel_error(render, target, mask=None):
+    """Mean absolute pixel error, optionally restricted to observed pixels.
+
+    ``mask`` is an HxW array of ones (observed) and zeros (deficient).  A
+    fully masked-out swatch has no observations and yields ``None`` instead
+    of a misleading zero.
+    """
+    diff = np.abs(render - target).mean(axis=2)
+    if mask is None:
+        return float(diff.mean())
+    mask = np.asarray(mask, dtype=float)
+    if mask.sum() == 0:
+        return None
+    return float((diff * mask).sum() / mask.sum())
+
+
 def multiscale_loss(graph, target, uv_scale=1.0, factors=(1, 2, 4),
-                    space_override=None, profile="fine"):
-    """Evaluate loss at several scales; coarser scales emphasise global stats."""
+                    space_override=None, profile="fine", mask=None):
+    """Evaluate loss at several scales; coarser scales emphasises global stats."""
     base = render_graph(graph, target.shape[0], uv_scale, space_override)
+    # Copy before masking so the caller's target pixels are never mutated:
+    # downstream probes (witness decal, coupling) reuse the same array.
+    target = target.copy()
+    if mask is not None:
+        mask = np.asarray(mask, dtype=float)
+        base = base * mask[..., None]
+        target = target * mask[..., None]
     total = 0.0
     detail = {}
     mean_warn = False

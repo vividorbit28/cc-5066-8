@@ -185,6 +185,25 @@
         coordinate descent; discrete seeds/kinds/octaves are enumerated and
         pre-screened in two tiers.</div>
     </div>
+
+    <div class="panel">
+      <h2>4 · Deficient observations (mask)</h2>
+      <label>Observation mask</label>
+      <select id="maskKind">
+        <option value="none">full observation</option>
+        <option value="band">missing border band</option>
+        <option value="random">random missing pixels</option>
+      </select>
+      <div class="row">
+        <button id="applyMask" class="secondary">Apply mask</button>
+        <button id="clearMask" class="secondary">Clear mask</button>
+      </div>
+      <figure style="margin-top:8px;display:none" id="maskFig">
+        <img id="maskImg" alt="observation mask">
+        <figcaption><span>Observed (white) vs deficient (black)</span>
+          <span id="maskFrac" class="pill"></span></figcaption>
+      </figure>
+    </div>
   </div>
 
   <!-- ===================== CENTER: images + trajectory ===================== -->
@@ -235,6 +254,24 @@
     <div class="panel">
       <h2>Anomalies — parameters &amp; render diff</h2>
       <div id="anomBody"><div class="muted">No fit yet.</div></div>
+    </div>
+
+    <div class="panel">
+      <h2>Parameter coupling diagnostics</h2>
+      <div class="hint" style="margin-bottom:8px">All numbers below are
+        recomputed from rendered pixels; ground-truth parameters are never
+        read by the diagnostics.</div>
+      <div class="row">
+        <button id="pairBtn" class="secondary">Equivalent pair · 2nd view</button>
+        <button id="surfBtn" class="secondary">Perturbation surface</button>
+      </div>
+      <div class="row">
+        <button id="stagBtn" class="secondary">Stagnation check</button>
+        <button id="rerunBtn" class="secondary">Verify rerun</button>
+      </div>
+      <div id="couplingBody" class="scroll" style="margin-top:10px">
+        <div class="muted">Run a fit, then probe the fitted graph.</div>
+      </div>
     </div>
   </div>
 </div>
@@ -331,6 +368,8 @@ function resetResults() {
   $('equivBody').innerHTML = '<div class="muted">No fit yet.</div>';
   $('anomBody').innerHTML = '<div class="muted">No fit yet.</div>';
   $('witnessBody').textContent = 'Run a fit to compute the witness decal.';
+  $('couplingBody').innerHTML =
+    '<div class="muted">Run a fit, then probe the fitted graph.</div>';
   $('downloadGraph').disabled = true; lastGraphJson = null;
   $('evals').textContent='0'; $('liveLoss').textContent='—'; $('stage').textContent='—';
   $('residualHint').textContent=''; $('lossTag').textContent='';
@@ -358,6 +397,7 @@ async function renderReport(rep) {
   renderAnoms(rep);
   renderWitness(rep);
   renderResidualHint(rep);
+  renderCouplingReport(rep.coupling);
   lastGraphJson = rep.graph_json;
   $('downloadGraph').disabled = false;
 }
@@ -489,6 +529,94 @@ $('downloadGraph').onclick = () => {
   a.download = 'fitted_graph.json'; a.click();
   URL.revokeObjectURL(a.href);
 };
+
+// ---- observation mask ------------------------------------------------------
+async function applyMask(kind) {
+  const payload = kind === 'band' ? {kind:'band', band:8}
+    : kind === 'random' ? {kind:'random', missing_fraction:0.25}
+    : {kind:'none'};
+  const r = await post('/api/mask', payload);
+  if (r.error) { return; }
+  if (kind === 'none' || r.observed_fraction === null) {
+    $('maskFig').style.display = 'none';
+  } else {
+    $('maskFig').style.display = 'block';
+    $('maskImg').src = '/api/mask.png?t=' + Date.now();
+    $('maskFrac').textContent = (r.observed_fraction * 100).toFixed(0) + '% observed';
+  }
+  resetResults();
+}
+$('applyMask').onclick = () => applyMask($('maskKind').value);
+$('clearMask').onclick = () => { $('maskKind').value = 'none'; applyMask('none'); };
+
+// ---- coupling diagnostics --------------------------------------------------
+function coupLine(k, v) {
+  return '<div class="kv"><span class="k">' + k + '</span>' +
+    '<span class="v">' + v + '</span></div>';
+}
+function renderCouplingReport(c) {
+  if (!c) { $('couplingBody').innerHTML = '<div class="muted">No data.</div>'; return; }
+  let html = '';
+  const p = c.equivalent_pair;
+  if (p) {
+    const cls = p.preset_eligible === 'none' ? 'reject' : 'accept';
+    html += '<div class="cluster"><div class="node-head"><b>Equivalent pair</b>' +
+      '<span class="pill ' + cls + '">preset: ' + p.preset_eligible + '</span></div>' +
+      coupLine('Attribution', p.attribution) +
+      coupLine('Locked params', p.locked.join(', ')) +
+      coupLine('Front uv ' + p.front_uv + ' err A / B',
+        p.front_error_a.toFixed(4) + ' / ' + p.front_error_b.toFixed(4)) +
+      coupLine('2nd uv ' + p.second_uv + ' err A / B',
+        p.second_error_a.toFixed(4) + ' / ' + p.second_error_b.toFixed(4)) +
+      '<div class="hint">' + p.reason + '</div></div>';
+  }
+  (c.coupling_surfaces || []).forEach(s => {
+    html += '<div class="cluster"><div class="node-head"><b>' +
+      s.param_a + ' ↔ ' + s.param_b + '</b>' +
+      '<span class="pill">' + s.verdict + '</span></div>' +
+      coupLine('Axis peak A / B',
+        s.axis_peak_a.toFixed(4) + ' / ' + s.axis_peak_b.toFixed(4)) +
+      coupLine('Compensating peak', s.compensating_peak.toExponential(2)) +
+      coupLine('Opposing peak', s.opposing_peak.toFixed(4)) +
+      '<div class="hint">' + s.reason + '</div></div>';
+  });
+  if (c.stagnation) {
+    const st = c.stagnation;
+    html += '<div class="cluster"><div class="node-head"><b>Stagnation</b>' +
+      '<span class="pill">' + st.verdict + '</span></div>' +
+      coupLine('Observed fraction', (st.observed_fraction * 100).toFixed(0) + '%') +
+      coupLine('Observed error', st.observed_error === null ? 'n/a'
+        : st.observed_error.toFixed(4)) +
+      coupLine('Full-swatch error', st.full_error.toFixed(4)) +
+      coupLine('Flat parameters',
+        st.sensitivity.filter(x => x.flat).map(x => x.param).join(', ') || 'none') +
+      '<div class="hint">' + st.reason + '</div></div>';
+  }
+  $('couplingBody').innerHTML = html || '<div class="muted">No data.</div>';
+}
+
+async function probe(path, body) {
+  $('couplingBody').innerHTML = '<div class="muted">Computing from fresh renders…</div>';
+  const r = await post(path, body || {});
+  if (r.error) { $('couplingBody').innerHTML =
+    '<div class="anomaly error"><div>' + r.error + '</div></div>'; return; }
+  if (path.endsWith('/rerun')) {
+    $('couplingBody').innerHTML = '<div class="cluster"><div class="node-head">' +
+      '<b>Rerun verification</b><span class="pill ' +
+      (r.matches ? 'accept' : 'reject') + '">' +
+      (r.matches ? 'reproduced' : 'mismatch') + '</span></div>' +
+      coupLine('Loss drift', r.loss_drift.toExponential(2)) +
+      coupLine('Sensitivity drift', r.sensitivity_drift.toExponential(2)) +
+      coupLine('Trajectory drift', r.trajectory_drift.toExponential(2)) +
+      '<div class="hint">' + r.reason + '</div></div>';
+    return;
+  }
+  renderCouplingReport(r);
+}
+$('pairBtn').onclick = () => probe('/api/diagnose/pair', {second_uv: 0.5});
+$('surfBtn').onclick = () => probe('/api/diagnose/surface', {steps: 4});
+$('stagBtn').onclick = () => probe('/api/diagnose/stagnation');
+$('rerunBtn').onclick = () => probe('/api/diagnose/rerun');
 
 loadTarget();
 </script>

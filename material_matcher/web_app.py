@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 
+from . import coupling as cmod
 from .decals import render_in_space
 from .engine import JobManager, edit_target, make_graph_template
 from .graph import NODE_LABELS, REGISTRY, MaterialGraph
@@ -32,6 +33,26 @@ from .templates import inexpressible_target, procedural_target
 # CLI/demo path exercises the heavier settings.
 DEFAULT_SIZE = 64
 DEFAULT_MAX_CONFIGS = 4
+
+
+def _sensitivity_payload(records):
+    return [r.to_dict() if hasattr(r, "to_dict") else r for r in records]
+
+
+def _coupling_payload(coupling):
+    """JSON-safe view of the coupling evidence chain (no ground truth)."""
+    if coupling is None:
+        return None
+    pair = coupling.get("equivalent_pair")
+    return {
+        "equivalent_pair": pair.to_dict() if pair is not None else None,
+        "coupling_surfaces": [s.to_dict()
+                              for s in coupling.get("coupling_surfaces", [])],
+        "sensitivity": _sensitivity_payload(
+            coupling.get("sensitivity", [])),
+        "stagnation": (coupling["stagnation"].to_dict()
+                       if coupling.get("stagnation") is not None else None),
+    }
 
 
 class Session:
@@ -51,6 +72,10 @@ class Session:
         self.graph = None
         self.truth = None                        # known ground truth, if any
         self.last_job_id = None
+        self.last_run_id = None
+        self.tracker = cmod.RunTracker()
+        self.run_counter = 0
+        self.observation_mask = None
         self.reset_target()
 
     # -- target management --------------------------------------------------
@@ -75,6 +100,7 @@ class Session:
                 self.truth, size=self.size, seed=self.seed)
         self.graph = make_graph_template(
             self.template, seed=self.seed, space=self.space)
+        self.observation_mask = None
 
     def apply_edits(self, brightness, contrast, hue_deg):
         with self.lock:
@@ -88,11 +114,17 @@ class Session:
                 raise RuntimeError("no target loaded")
             graph = self.graph.clone()
             target = self.target.copy()
+            mask = (self.observation_mask.copy()
+                    if self.observation_mask is not None else None)
+        self.run_counter += 1
+        run_id = f"run-{self.run_counter:04d}"
         job_id = self.jobs.start(
             graph, target, seed=self.seed,
-            max_configs=max_configs)
+            max_configs=max_configs, tracker=self.tracker, run_id=run_id,
+            observation_mask=mask)
         with self.lock:
             self.last_job_id = job_id
+            self.last_run_id = run_id
         return job_id
 
     def report(self):
@@ -156,6 +188,7 @@ def report_payload(job):
              "components": e.components, "params": e.params}
             for e in result.equivalents],
         "witness": witness_payload(report["witness"]),
+        "coupling": _coupling_payload(report.get("coupling")),
         "graph": graph_payload(report["fitted_graph"]),
         "graph_json": report["fitted_graph"].to_dict(),
         "target_summary": report["target_summary"],
@@ -208,6 +241,14 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/target.png":
                 with SESSION.lock:
                     return self._send_png(SESSION.target)
+            if path == "/api/mask.png":
+                with SESSION.lock:
+                    if SESSION.observation_mask is None:
+                        return self._send_json(
+                            {"error": "no observation mask"}, 409)
+                    m = SESSION.observation_mask
+                    img = np.repeat(m[..., None], 3, axis=2)
+                return self._send_png(img)
             if path == "/api/template.png":
                 with SESSION.lock:
                     img = render_graph(SESSION.graph, SESSION.size)
@@ -230,6 +271,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._edit_target(payload)
             if path == "/api/fit":
                 return self._start_fit(payload)
+            if path == "/api/mask":
+                return self._set_mask(payload)
+            if path == "/api/diagnose/pair":
+                return self._diagnose_pair(payload)
+            if path == "/api/diagnose/surface":
+                return self._diagnose_surface(payload)
+            if path == "/api/diagnose/stagnation":
+                return self._diagnose_stagnation(payload)
+            if path == "/api/diagnose/rerun":
+                return self._diagnose_rerun(payload)
             self._send_json({"error": "not found"}, 404)
         except Exception as exc:
             self._send_json({"error": repr(exc)}, 500)
@@ -254,6 +305,9 @@ class Handler(BaseHTTPRequestHandler):
                 "ground_truth": SESSION.truth,
                 "graph": graph_payload(SESSION.graph),
                 "last_job_id": SESSION.last_job_id,
+                "observed_fraction": (
+                    None if SESSION.observation_mask is None
+                    else float(SESSION.observation_mask.mean())),
             }
 
     def _job_status(self):
@@ -316,6 +370,7 @@ class Handler(BaseHTTPRequestHandler):
             SESSION.reset_target(kind="procedural", seed=seed)
         with SESSION.lock:
             SESSION.last_job_id = None
+            SESSION.last_run_id = None
         return self._send_json({"ok": True, "state": self._state()})
 
     def _edit_target(self, payload):
@@ -325,12 +380,91 @@ class Handler(BaseHTTPRequestHandler):
             float(payload.get("hue", 0.0)))
         with SESSION.lock:
             SESSION.last_job_id = None
+            SESSION.last_run_id = None
         return self._send_json({"ok": True})
 
     def _start_fit(self, payload):
         max_configs = int(payload.get("max_configs", DEFAULT_MAX_CONFIGS))
         job_id = SESSION.start_job(max_configs)
         return self._send_json({"job_id": job_id})
+
+    # -- coupling diagnostics ----------------------------------------------
+    def _current_graph(self):
+        """The graph diagnostics operate on: fitted result if present."""
+        job = SESSION.report()
+        if job and job["state"] == "done":
+            return job["report"]["fitted_graph"].clone()
+        return SESSION.graph.clone()
+
+    def _set_mask(self, payload):
+        kind = payload.get("kind", "none")
+        size = SESSION.size
+        if kind == "band":
+            band = int(payload.get("band", max(1, size // 8)))
+            SESSION.observation_mask = cmod.make_observation_mask(
+                size, band=band)
+        elif kind == "random":
+            fraction = float(payload.get("missing_fraction", 0.25))
+            SESSION.observation_mask = cmod.make_observation_mask(
+                size, missing_fraction=fraction,
+                seed=int(payload.get("seed", 0)))
+        else:
+            SESSION.observation_mask = None
+        with SESSION.lock:
+            SESSION.last_job_id = None
+            SESSION.last_run_id = None
+        observed = (None if SESSION.observation_mask is None
+                    else float(SESSION.observation_mask.mean()))
+        return self._send_json({"ok": True, "observed_fraction": observed})
+
+    def _diagnose_pair(self, payload):
+        with SESSION.lock:
+            graph = self._current_graph()
+            target = SESSION.target.copy()
+            mask = (SESSION.observation_mask.copy()
+                    if SESSION.observation_mask is not None else None)
+        second_uv = float(payload.get("second_uv", 0.5))
+        pair = cmod.build_equivalent_pair(
+            graph, target, second_uv=second_uv, size=SESSION.size,
+            mask=mask)
+        return self._send_json(pair.to_dict())
+
+    def _diagnose_surface(self, payload):
+        with SESSION.lock:
+            graph = self._current_graph()
+            target = SESSION.target.copy()
+        nodes = graph.nodes
+        noise_id = next(nid for nid, n in nodes.items() if n.type == "noise")
+        xform = next((nid for nid, n in nodes.items()
+                      if n.type == "transform"), None)
+        param_a = payload.get("param_a", f"{noise_id}.scale")
+        param_b = payload.get(
+            "param_b", f"{xform}.scale_x" if xform else param_a)
+        surface = cmod.perturbation_surface(
+            graph, target, param_a, param_b, size=SESSION.size,
+            steps=int(payload.get("steps", 4)))
+        return self._send_json(surface.to_dict())
+
+    def _diagnose_stagnation(self, payload):
+        with SESSION.lock:
+            graph = self._current_graph()
+            target = SESSION.target.copy()
+            mask = (SESSION.observation_mask.copy()
+                    if SESSION.observation_mask is not None else None)
+        verdict = cmod.diagnose_stagnation(
+            graph, target, mask=mask, size=SESSION.size)
+        return self._send_json(verdict.to_dict())
+
+    def _diagnose_rerun(self, payload):
+        run_id = payload.get("run_id") or SESSION.last_run_id
+        if not run_id or run_id not in SESSION.tracker.runs:
+            return self._send_json(
+                {"error": "no recorded run to verify"}, 409)
+        with SESSION.lock:
+            graph = self._current_graph()
+            target = SESSION.target.copy()
+        check = SESSION.tracker.rerun_verification(run_id, graph, target)
+        return self._send_json(check.to_dict())
 
 
 def main(argv=None):

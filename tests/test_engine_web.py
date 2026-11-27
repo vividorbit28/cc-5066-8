@@ -11,6 +11,12 @@ from material_matcher import web_app
 from material_matcher.engine import JobManager, edit_target, fit_material
 from material_matcher.templates import build_chain, procedural_target
 
+# Coupling-driven HTTP tests use a smaller swatch and a single discrete
+# configuration so the background fit stays well inside the wait window;
+# the coupling probes themselves are asserted independently of search depth.
+COUPLING_SIZE = 28
+COUPLING_CONFIGS = 1
+
 
 def _post(url, payload):
     req = urllib.request.Request(
@@ -144,6 +150,68 @@ class TestWebAPI(unittest.TestCase):
         _, job_state = _get_json(self.base + "/api/job")
         graph_json = job_state["report"]["graph_json"]
         self.assertIn("nodes", graph_json)
+
+    def test_fit_report_carries_coupling_evidence(self):
+        _post(self.base + "/api/target",
+              {"kind": "procedural", "size": COUPLING_SIZE, "seed": 2})
+        _post(self.base + "/api/fit", {"max_configs": COUPLING_CONFIGS})
+        report = self._wait_for_job(timeout=120)
+        coupling = report["coupling"]
+        self.assertIsNotNone(coupling)
+        # The evidence chain is present and uses observable quantities only.
+        self.assertIn("equivalent_pair", coupling)
+        self.assertTrue(coupling["equivalent_pair"]["locked"])
+        self.assertIn("preset_eligible", coupling["equivalent_pair"])
+        self.assertTrue(coupling["coupling_surfaces"])
+        self.assertEqual(
+            coupling["coupling_surfaces"][0]["param_a"], "noise.scale")
+        self.assertIn("stagnation", coupling)
+        self.assertTrue(coupling["sensitivity"])
+        # A coupling-derived anomaly is evidence-backed, never a bare flag.
+        coupling_flags = [a for a in report["anomalies"]
+                          if a["code"] in ("parameter_coupling",
+                                           "derivative_error",
+                                           "coupled_parameter_family")]
+        for flag in coupling_flags:
+            self.assertIn("evidence", flag)
+            self.assertEqual(flag["evidence"]["stage"], "final")
+
+    def test_coupling_diagnostic_endpoints(self):
+        _post(self.base + "/api/target",
+              {"kind": "procedural", "size": COUPLING_SIZE, "seed": 2})
+        _, pair = _post(self.base + "/api/diagnose/pair",
+                        {"second_uv": 0.5})
+        self.assertIn("attribution", pair)
+        self.assertIn(pair["attribution"],
+                      ("frequency", "sampling", "ambiguous"))
+        _, surface = _post(self.base + "/api/diagnose/surface", {"steps": 4})
+        self.assertIn(surface["verdict"],
+                      ("coupled", "derivative_error", "independent"))
+        _, stagnation = _post(self.base + "/api/diagnose/stagnation", {})
+        self.assertIn(stagnation["verdict"],
+                      ("stagnation", "non_identifiable",
+                       "deficient_observation", "converged"))
+
+    def test_mask_endpoint_and_deficient_rerun(self):
+        _post(self.base + "/api/target",
+              {"kind": "procedural", "size": COUPLING_SIZE, "seed": 2})
+        _, mask_ack = _post(self.base + "/api/mask",
+                            {"kind": "band", "band": COUPLING_SIZE // 4})
+        self.assertLess(mask_ack["observed_fraction"], 1.0)
+        status, png, headers = _get(self.base + "/api/mask.png")
+        self.assertEqual(headers["Content-Type"], "image/png")
+        _, stagnation = _post(self.base + "/api/diagnose/stagnation", {})
+        self.assertIn(stagnation["verdict"],
+                      ("stagnation", "non_identifiable",
+                       "deficient_observation", "converged"))
+        # A fit under the mask records a run the rerun endpoint can verify.
+        _post(self.base + "/api/fit", {"max_configs": COUPLING_CONFIGS})
+        self._wait_for_job(timeout=120)
+        _, rerun = _post(self.base + "/api/diagnose/rerun", {})
+        self.assertIn("matches", rerun)
+        self.assertIn("loss_drift", rerun)
+        # Restore full observation for the other tests sharing the session.
+        _post(self.base + "/api/mask", {"kind": "none"})
 
     def _wait_for_job(self, timeout=180):
         deadline = time.time() + timeout

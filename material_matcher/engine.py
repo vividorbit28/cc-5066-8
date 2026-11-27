@@ -7,6 +7,7 @@ import uuid
 
 import numpy as np
 
+from . import coupling as cmod
 from .decals import run_witness
 from .diagnostics import diagnose, fit_status
 from .graph import MaterialGraph
@@ -44,21 +45,82 @@ def edit_target(target, *, brightness=0.0, contrast=0.0, hue_shift=0.0):
     return np.clip(img, 0.0, 1.0)
 
 
+def coupling_analysis(graph, target, *, uv_scale=1.0, size=None,
+                      second_uv=0.5, mask=None):
+    """Run the parameter-coupling evidence chain on a fitted graph.
+
+    All three probes reuse small local renders around the fitted assignment,
+    so the added cost is a fixed, bounded number of renders independent of
+    the search budget.  Nothing here receives ground-truth parameters.
+    """
+    size = size or target.shape[0]
+    has_transform = any(n.type == "transform" for n in graph.nodes.values())
+    pair = None
+    if has_transform:
+        pair = cmod.build_equivalent_pair(
+            graph, target, front_uv=uv_scale, second_uv=second_uv,
+            size=size, mask=mask)
+
+    surfaces = []
+    if has_transform:
+        noise_id = next(nid for nid, n in graph.nodes.items()
+                        if n.type == "noise")
+        xform_id = next(nid for nid, n in graph.nodes.items()
+                        if n.type == "transform")
+        # A compact 3x4 sweep keeps the perturbation render count bounded.
+        # scale_y follows scale_x so the isotropic sampling invariant holds.
+        surfaces.append(cmod.perturbation_surface(
+            graph, target, f"{noise_id}.scale",
+            f"{xform_id}.scale_x",
+            follow_params=[f"{xform_id}.scale_y"],
+            size=size, uv_scale=uv_scale, steps=4))
+
+    _, sensitivity = cmod.sensitivity_scan(
+        graph, target, size=size, uv_scale=uv_scale, steps=3, stage="final")
+    stagnation = cmod.diagnose_stagnation(
+        graph, target, mask=mask, size=size, uv_scale=uv_scale,
+        stage="final")
+    return {
+        "equivalent_pair": pair,
+        "coupling_surfaces": surfaces,
+        "sensitivity": sensitivity,
+        "stagnation": stagnation,
+    }
+
+
 def fit_material(graph: MaterialGraph, target, *,
                  seed=0, run_witness_decal=True, uv_scale=1.0,
-                 progress=None, factors=(1, 2, 4), max_configs=4):
+                 progress=None, factors=(1, 2, 4), max_configs=4,
+                 run_coupling=True, observation_mask=None, tracker=None,
+                 run_id=None):
     """Run the full inverse pipeline and return a serialisable report."""
     def cb(event, payload):
         if progress and event == "iteration":
             progress(payload)
 
+    if tracker is not None and run_id is not None:
+        tracker.start_run(run_id, graph=graph, target=target,
+                          uv_scale=uv_scale, size=target.shape[0],
+                          factors=factors)
+        def tracking_cb(event, payload):
+            cb(event, payload)
+            if event == "iteration":
+                tracker.record_trajectory(
+                    run_id, payload.get("stage", ""),
+                    payload["best_loss"], payload["evaluations"],
+                    payload.get("components"))
+        search_cb = tracking_cb
+    else:
+        search_cb = cb
+
     result = inverse_search(
-        graph, target, seed=seed, callback=cb, max_configs=max_configs,
+        graph, target, seed=seed, callback=search_cb, max_configs=max_configs,
         factors=factors, uv_scale=uv_scale)
 
     fitted = result.graph
     loss, comp, render, mean_warn = multiscale_loss(
-        fitted, target, uv_scale=uv_scale, factors=factors)
+        fitted, target, uv_scale=uv_scale, factors=factors,
+        mask=observation_mask)
     diff = np.abs(render - target)
 
     witness = None
@@ -71,7 +133,32 @@ def fit_material(graph: MaterialGraph, target, *,
         witness = run_witness(g_obj, g_wld, target, size=target.shape[0],
                               uv_scale=uv_scale)
 
-    anomalies = diagnose(result, target, witness)
+    coupling = None
+    if run_coupling:
+        coupling = coupling_analysis(
+            fitted, target, uv_scale=uv_scale, size=target.shape[0],
+            mask=observation_mask)
+        if tracker is not None and run_id is not None:
+            if coupling["equivalent_pair"] is not None:
+                tracker.record_equivalent_pair(
+                    run_id, coupling["equivalent_pair"])
+            for surface in coupling["coupling_surfaces"]:
+                tracker.record_coupling_surface(run_id, surface)
+            tracker.record_sensitivity(run_id, coupling["sensitivity"],
+                                       stage="final")
+            if coupling["stagnation"].verdict in (
+                    "stagnation", "non_identifiable",
+                    "deficient_observation"):
+                tracker.record_anomaly(
+                    run_id, f"coupling_{coupling['stagnation'].verdict}",
+                    coupling["stagnation"].reason, stage="final",
+                    evidence={"full_error":
+                              coupling["stagnation"].full_error,
+                              "observed_fraction":
+                              coupling["stagnation"].observed_fraction})
+            tracker.finish_run(run_id, fitted, target, factors=factors)
+
+    anomalies = diagnose(result, target, witness, coupling=coupling)
     return {
         "result": result,
         "fitted_graph": fitted,
@@ -79,6 +166,7 @@ def fit_material(graph: MaterialGraph, target, *,
         "diff": diff,
         "diff_amplified": np.clip(diff * 3.0, 0.0, 1.0),
         "witness": witness,
+        "coupling": coupling,
         "anomalies": anomalies,
         "status": fit_status(result),
         "target_summary": appearance_summary(target),
